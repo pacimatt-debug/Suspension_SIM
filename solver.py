@@ -2,126 +2,123 @@ import numpy as np
 from scipy.optimize import fsolve
 
 class SuspensionSolver:
-    def __init__(self, geom_data, shim_stack):
-        # --- 1. DATI GEOMETRICI (Conversioni mm -> metri) ---
-        self.d_valve = geom_data['d_valve'] / 1000.0
-        self.d_rod = geom_data['d_rod'] / 1000.0
+    def __init__(self, geom, stack_data):
+        # --- 1. GEOMETRIA BASE ---
+        self.d_valve = geom.get('d_valve', 34.0) / 1000.0
+        self.d_rod = geom.get('d_rod', 12.0) / 1000.0
+        self.d_throat = geom.get('d_throat', 10.0) / 1000.0
+        self.bleed = geom.get('bleed', 1.5) / 1000.0
+        self.d_leak = geom.get('d_leak', 0.0) / 1000.0 # Leak Jet aggiuntivo
         
-        # Geometria Porte (Cruciale per il calcolo della forza)
-        self.r_port = geom_data['r_port'] / 1000.0   # Raggio di applicazione forza
-        self.w_port = geom_data['w_port'] / 1000.0   # Larghezza arco (lunghezza asola)
-        self.n_port = int(geom_data['n_port'])       # Numero di porte
-        self.d_clamp = geom_data['d_clamp'] / 1000.0 # Diametro del fulcro (clamp)
+        # --- 2. DETTAGLI PORTA & SEDE ---
+        self.r_port = geom.get('r_port', self.d_valve*0.35) / 1000.0
+        self.w_port = geom.get('w_port', self.d_valve*0.4) / 1000.0
+        self.n_port = int(geom.get('n_port', 4))
+        self.w_seat = geom.get('w_seat', 1.0) / 1000.0  # Larghezza sede
+        self.d_clamp = geom.get('d_clamp', 12.0) / 1000.0
         
-        # Passaggi Olio
-        self.d_throat = geom_data['d_throat'] / 1000.0
-        self.bleed = geom_data['bleed'] / 1000.0
+        # --- 3. DATI AMBIENTALI & MOLLA ---
+        self.P_gas = geom.get('p_gas', 1.5) * 1e5 # Bar -> Pascal (assoluti approx)
+        self.k_hsc = geom.get('k_hsc', 0.0) * 1000 # N/mm -> N/m
+        self.preload_hsc = geom.get('preload_hsc', 0.0) / 1000.0 # mm -> m
         
-        # Dati Olio (Default W5 se mancano)
-        self.rho = geom_data.get('oil_density', 870.0) 
-        self.visc = geom_data.get('oil_visc', 15.0) # cSt (non usato in Bernoulli puro ma utile per estensioni)
-
-        # --- 2. CALCOLO AREE FISSE ---
+        self.rho = geom.get('oil_density', 870.0)
+        
+        # --- 4. STACK & FLOAT ---
+        self.shims = stack_data.get('shims', [])
+        self.h_deck = stack_data.get('h_deck', 0.0) / 1000.0 # Float in metri
+        
+        # Calcolo Aree
         self.A_rod = np.pi * (self.d_rod/2)**2
         self.A_valve = np.pi * (self.d_valve/2)**2
-        # Area attiva (Mid Valve = Anello, Base Valve = Stelo)
-        # Qui assumiamo logica Mid-Valve per default, ma è parametrizzabile
-        self.A_piston_active = self.A_valve - self.A_rod 
-
-        # --- 3. INIZIALIZZAZIONE STACK ---
-        self.shims = shim_stack
-        self.k_stack = self._calculate_stiffness_precise()
-
-    def _calculate_stiffness_precise(self):
-        """
-        Calcola la rigidezza basandosi sulla Teoria delle Piastre.
-        Usa il raggio di applicazione forza (r_port) e il fulcro (d_clamp).
-        """
-        k_total = 0.0
+        self.A_active = self.A_valve - self.A_rod # Mid Valve logic
         
-        # Punto di applicazione della forza idraulica (centro della porta)
-        load_radius = self.r_port 
-        clamp_radius = self.d_clamp / 2.0
-        
-        # Braccio di leva effettivo
-        lever_arm = load_radius - clamp_radius
-        if lever_arm <= 0: lever_arm = 0.001 # Evita div by zero
+        # Calcolo Rigidezza Stack
+        self.k_shims = self._calculate_shim_stiffness()
+
+    def _calculate_shim_stiffness(self):
+        k_tot = 0.0
+        # Braccio di leva effettivo (Centro Porta - Bordo Clamp)
+        lever = self.r_port - (self.d_clamp / 2.0)
+        if lever <= 0: lever = 0.001
         
         for shim in self.shims:
-            od = shim['od'] / 1000.0 # Converti in metri
+            od = shim['od'] / 1000.0
             th = shim['th'] / 1000.0
-            id_shim = 0.006 # Diametro interno standard (es. 6mm o 8mm), ininfluente per la flessione esterna
+            if (od/2) <= (self.d_clamp/2): continue
             
-            shim_radius = od / 2.0
+            # Formula Piastra Circolare (Roark's Formulas semplificata per stack)
+            # E (Young) = 210e9 Pa
+            # Rigidezza aumenta con spessore^3
+            # Diminuisce con (R_ext - R_clamp)^2
+            r_ratio = (od - self.d_clamp) / 2
+            k_s = (210e9 * th**3) / (lever * r_ratio) * 0.15 # Fattore calibrazione
+            k_tot += k_s
             
-            # Se la lamella è più piccola del clamp, o non copre i port, non lavora a flessione
-            if shim_radius <= clamp_radius: continue
-            
-            # Modello Cubico Semplificato (Beam Theory su piastra circolare)
-            # K = (E * t^3) / (Costante * Leva^2)
-            # E (Modulo Young Acciaio) ~ 210 GPa
-            E = 210e9 
-            
-            # Fattore geometrico empirico per piastre anulari (ReStackor approssimazione)
-            # Più la lamella è grande rispetto al carico, più è morbida
-            geometry_factor = (shim_radius - clamp_radius) / lever_arm
-            
-            k_shim = (E * th**3) / (lever_arm**2 * geometry_factor) * 0.05 # 0.05 fattore correttivo shape
-            
-            k_total += k_shim
-            
-        return k_total
+        return k_tot
 
-    def calculate_force(self, velocity, clicker_openness_percent=100):
-        if velocity == 0: return 0
+    def calculate_force(self, v, clicker_pct=100):
+        if v == 0: return 0
         
-        # Flusso Volumetrico Q [m^3/s]
-        flow_rate = velocity * self.A_piston_active
-        Cd = 0.7 # Coefficiente di scarico turbolento
+        Q_target = v * self.A_active
+        Cd = 0.7
         
-        # Area Bleed (Clicker)
-        eff_bleed_dia = self.bleed * (clicker_openness_percent / 100.0)
-        area_bleed = np.pi * (eff_bleed_dia/2)**2
+        # Aree di bypass fisse (Clicker + Leak Jet)
+        area_clicker = np.pi * ((self.bleed * clicker_pct/100)/2)**2
+        area_leak = np.pi * (self.d_leak/2)**2
+        area_bypass = area_clicker + area_leak
 
-        # Risolutore Pressione (Bernoulli modificato)
-        def pressure_balance(dp):
-            if dp <= 0: return -flow_rate
+        def pressure_eq(dp):
+            if dp <= 0: return -Q_target
             
-            # 1. Flusso Bleed (Regime Turbolento)
-            q_bleed = Cd * area_bleed * np.sqrt(2 * dp / self.rho)
+            # 1. Flusso Bypass
+            q_bypass = Cd * area_bypass * np.sqrt(2 * dp / self.rho)
             
-            # 2. Flusso Main Stack
-            # Forza idraulica che agisce sulle lamelle
-            # La pressione agisce solo sull'area delle porte, non su tutto il pistone!
-            area_ports_total = self.n_port * (self.w_port * (self.d_valve/2 - self.d_clamp/2)) # Stima area porte rettangolari
-            f_hyd = dp * area_ports_total
+            # 2. Flusso Valvola
+            # Forza Idraulica sulla faccia delle lamelle
+            # Area efficace = Area Port + (parte del Seat)
+            area_force = self.n_port * (self.w_port * (self.r_port - self.d_clamp/2)) # Approx
+            f_hyd = dp * area_force
             
-            # Lift (Apertura) in metri
-            if self.k_stack > 1:
-                lift = f_hyd / self.k_stack
-            else:
-                lift = 0.005 # Se stack nullo, apri tutto
+            # Lift Totale = Float + (Forza - PrecaricoMolla) / (K_shims + K_molla)
+            # Gestione Float (h_deck): è un'apertura gratis iniziale? 
+            # In ReStackor h.deck > 0 su MV significa "gap libero".
             
-            # Calcolo Area di Passaggio (Curtain Area)
-            # Area = Perimetro Porte * Lift
-            port_perimeter = self.n_port * (2 * self.w_port + 2 * (self.d_valve - self.d_clamp)/4) # Perimetro approx
-            area_shim_curtain = port_perimeter * lift
+            # Forza che contrasta l'apertura
+            f_resist = 0
+            # Molla HSC
+            f_spring = self.preload_hsc * self.k_hsc
             
-            # Saturazione: L'olio non può passare più dell'area geometrica dei buchi (Throat)
-            area_throat_max = np.pi * (self.d_throat/2)**2 * self.n_port # N tubi
+            net_force = f_hyd - f_spring
             
-            # L'area effettiva è il minimo tra quella generata dal lift e quella fisica del buco
-            area_flow_stack = min(area_shim_curtain, area_throat_max)
+            lift = self.h_deck # Parte dal float
             
-            q_stack = Cd * area_flow_stack * np.sqrt(2 * dp / self.rho)
+            if net_force > 0:
+                # Rigidezza combinata (Parallelo: Shims + Molla)
+                k_tot = self.k_shims + self.k_hsc
+                if k_tot > 1:
+                    lift += net_force / k_tot
+                else:
+                    lift += 0.01 # Valvola spalancata senza resistenza
             
-            return (q_bleed + q_stack) - flow_rate
+            # Calcolo Area di Passaggio (Curtain)
+            perim = self.n_port * (2*self.w_port + 2*(self.d_valve/2 - self.r_port)) # Approx perimetro asola
+            area_curtain = perim * lift
+            
+            # Saturazione Gola (Throat)
+            area_throat = self.n_port * np.pi * (self.d_throat/2)**2
+            area_flow = min(area_curtain, area_throat)
+            
+            q_valve = Cd * area_flow * np.sqrt(2 * dp / self.rho)
+            
+            return (q_bypass + q_valve) - Q_target
 
         try:
-            dp_sol = fsolve(pressure_balance, 10e5)[0] # Start guess 10 bar
+            # Check Cavitazione (limite fisico approx)
+            # Se la pressione richiesta > P_gas + 1 atm, potrebbe cavitare in estensione
+            # Qui risolviamo solo la caduta di pressione (Damping)
+            dp = fsolve(pressure_eq, 10e5)[0]
         except:
-            dp_sol = 0
-        
-        # Forza Smorzante = DeltaP * Area Attiva Pistone
-        force = dp_sol * self.A_piston_active
-        return force / 9.81 # kgf
+            dp = 0
+            
+        return dp * self.A_active / 9.81
