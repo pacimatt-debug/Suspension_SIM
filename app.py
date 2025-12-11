@@ -119,7 +119,28 @@ else:
         else:
             curr_stack = stacks[s_name]
             edited = st.data_editor(
-                pd.DataFrame(curr_stack), 
+                pd.DataFrame(curr_stack), # ... dopo st.data_editor ...
+            
+            # --- CONTROLLO SICUREZZA GEOMETRICA (IL BANNER) ---
+            # Trova la lamella più grande e quella più piccola nello stack
+            if not edited.empty:
+                max_shim_od = edited['od'].max()
+                min_shim_od = edited['od'].min()
+                
+                # REGOLE FISICHE
+                # 1. La lamella non può essere più grande del pistone (toccherebbe il cilindro!)
+                if max_shim_od >= geom['d_valve']:
+                    st.error(f"⛔ ERRORE CRITICO: Hai inserito una lamella da {max_shim_od}mm, ma il pistone è solo {geom['d_valve']}mm! Correggi lo stack.", icon="🚨")
+                    st.stop() # Ferma il programma qui
+                
+                # 2. La lamella non può essere più piccola del serraggio (Clamp)
+                if min_shim_od <= geom['d_clamp']:
+                    st.warning(f"⚠️ ATTENZIONE: Hai una lamella da {min_shim_od}mm che è più piccola o uguale al serraggio ({geom['d_clamp']}mm). Non fletterà.", icon="⚠️")
+            
+            # --- FINE CONTROLLO ---
+
+            if st.button("💾 Salva Modifiche", use_container_width=True):
+                # ... resto del codice ...
                 num_rows="dynamic", 
                 column_config={"od": st.column_config.NumberColumn("Diametro (mm)", format="%.1f"), "th": st.column_config.NumberColumn("Spessore (mm)", format="%.2f")}
             )
