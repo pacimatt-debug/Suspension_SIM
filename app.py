@@ -9,9 +9,10 @@ from solver import SuspensionSolver
 st.set_page_config(page_title="Suspension Pro Lab", layout="wide", page_icon="⚙️")
 st.title("⚙️ Suspension Pro Lab")
 
-# CSS per messaggi di errore più visibili
+# CSS per rendere i messaggi di errore ben visibili
 st.markdown("""<style>
     .stAlert { font-weight: bold; }
+    div.stButton > button:first-child { width: 100%; }
 </style>""", unsafe_allow_html=True)
 
 # --- INIT DATABASE ---
@@ -39,10 +40,10 @@ with st.sidebar:
     mode = st.radio("Seleziona Modalità:", ["🛠️ Banco Prova", "➕ Nuova Sospensione"])
     
     st.divider()
-    st.subheader("☁️ Gestione Dati")
-    st.info("Per ora usa questo tasto per salvare il lavoro e caricarlo sul tuo Google Drive.")
+    st.subheader("☁️ Salvataggio Cloud")
+    st.info("Scarica il file e salvalo nel tuo Google Drive.")
     
-    # TASTO EXPORT (Salvataggio Manuale su Drive)
+    # TASTO EXPORT (Salvataggio Manuale)
     st.download_button(
         label="📥 Scarica Database (.json)",
         data=json.dumps(db, indent=4),
@@ -153,7 +154,6 @@ else:
             )
             
             # --- CONTROLLI SICUREZZA (BANNER) ---
-            # Questo è il blocco che ti dava errore prima: ora è indentato correttamente
             error_found = False
             if edited is not None and not edited.empty:
                 max_shim = edited['od'].max()
@@ -203,8 +203,7 @@ else:
                 ax.plot(vels, f_o, linestyle="--", label=o)
                 
             ax.grid(True, alpha=0.3); ax.legend()
-            ax.set_xlabel("Velocità [m/s]"); ax.set_ylabel("Forza [kgf]")
-            st.pyplot(fig)
+            ax.set_xlabel("
             
             st.info(f"Rigidezza Stack: {solver.k_stack:.4e}")
                 st.info(f"Rigidezza Pacco Calcolata (Indice): **{solver.k_stack:.2f}**")
