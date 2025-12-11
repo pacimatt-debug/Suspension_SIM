@@ -3,162 +3,253 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import json
+import io
 from solver import SuspensionSolver
 
-st.set_page_config(page_title="Suspension Pro Lab", layout="wide", page_icon="⚙️")
-st.markdown("""<style>.stAlert {font-weight:bold;} h1 {color:#E63946;}</style>""", unsafe_allow_html=True)
-st.title("⚙️ Suspension Pro Lab")
+# --- CONFIGURAZIONE PAGINA ---
+st.set_page_config(page_title="Suspension Cloud Pro", layout="wide", page_icon="☁️")
+st.markdown("""<style>
+    .stAlert { font-weight: bold; }
+    div.stButton > button:first-child { width: 100%; font-weight: bold; }
+    h1 { color: #E63946; }
+</style>""", unsafe_allow_html=True)
 
-def init_db():
+st.title("☁️ Suspension Cloud Pro")
+
+# --- GESTIONE DRIVE (CONNESSIONE DIRETTA CARTELLA) ---
+try:
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
+    DRIVE_LIBS = True
+except ImportError:
+    DRIVE_LIBS = False
+
+def get_drive_service():
+    if not DRIVE_LIBS or "gcp_service_account" not in st.secrets: return None
+    try:
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        creds = service_account.Credentials.from_service_account_info(creds_dict, scopes=['https://www.googleapis.com/auth/drive'])
+        return build('drive', 'v3', credentials=creds)
+    except Exception as e:
+        st.error(f"Errore Auth Google: {e}")
+        return None
+
+def load_db():
+    folder_id = st.secrets.get("drive_folder_id") # Prende l'ID dai secrets
+    service = get_drive_service()
+    
+    if service and folder_id:
+        try:
+            # CERCA SOLO NELLA CARTELLA SPECIFICA
+            query = f"'{folder_id}' in parents and name='suspension_db.json' and trashed=false"
+            results = service.files().list(q=query).execute()
+            items = results.get('files', [])
+            
+            if items:
+                file_id = items[0]['id']
+                request = service.files().get_media(fileId=file_id)
+                fh = io.BytesIO()
+                downloader = MediaIoBaseDownload(fh, request)
+                done = False
+                while not done: status, done = downloader.next_chunk()
+                fh.seek(0)
+                st.toast("✅ Database sincronizzato dal Cloud!", icon="☁️")
+                return json.load(fh)
+            else:
+                st.warning("⚠️ File non trovato nella cartella. Al primo salvataggio verrà creato.")
+        except Exception as e:
+            st.error(f"Errore lettura Drive: {e}")
+
+    # Fallback: DB Vuoto
     return {
-        "WP AER 48 (2024) - Stock": {
+        "WP AER 48 (2024)": {
             "type": "Fork",
             "geometry": {
                 'd_valve': 34.0, 'd_rod': 12.0, 'd_clamp': 12.0,
                 'n_port': 4, 'd_throat': 9.0, 'n_throat': 4,
-                'r_port': 11.0, 'w_port': 14.0, 'h_deck': 2.0, # h.deck geometrico
+                'r_port': 11.0, 'w_port': 14.0, 'h_deck': 2.0,
                 'bleed': 1.5, 'd_leak': 0.0,
-                'k_ics': 2.2, 'flt_ics': 40.0, 'l_ics': 200.0, 'd_ics': 24.0, 'id_ics': 10.0,
-                'p_zero': 22.0
+                'p_zero': 22.0, 'k_ics': 2.2, 'flt_ics': 40.0, 'l_ics': 200.0, 'd_ics': 24.0, 'id_ics': 10.0
             },
-            "stacks": {
-                "Base": {"shims": [{"od": 30.0, "th": 0.15}], "stack_float": 0.0} # Float lamelle
-            }
+            "stacks": {"Base": {"shims": [{"od": 30.0, "th": 0.15}], "stack_float": 0.0}}
         }
     }
 
-if 'db' not in st.session_state: st.session_state['db'] = init_db()
+def save_db(db_data):
+    st.session_state['db'] = db_data
+    folder_id = st.secrets.get("drive_folder_id")
+    service = get_drive_service()
+    
+    if service and folder_id:
+        try:
+            fh = io.BytesIO(json.dumps(db_data, indent=4).encode('utf-8'))
+            media = MediaIoBaseUpload(fh, mimetype='application/json')
+            
+            # Cerca se esiste GIA' nella cartella
+            query = f"'{folder_id}' in parents and name='suspension_db.json' and trashed=false"
+            results = service.files().list(q=query).execute()
+            items = results.get('files', [])
+            
+            if not items:
+                # Crea NUOVO file DENTRO la cartella specifica
+                file_metadata = {
+                    'name': 'suspension_db.json',
+                    'parents': [folder_id] # <--- QUI STA LA MAGIA
+                }
+                service.files().create(body=file_metadata, media_body=media).execute()
+                st.success(f"File CREATO nella cartella Drive corretta!")
+            else:
+                # Aggiorna ESISTENTE
+                service.files().update(fileId=items[0]['id'], media_body=media).execute()
+                st.toast("Salvato su Drive!", icon="✅")
+            return True
+        except Exception as e:
+            st.error(f"Errore Scrittura Drive: {e}")
+            return False
+    else:
+        st.warning("⚠️ Configurazione Drive incompleta (Manca ID cartella nei Secrets). Salvataggio solo locale.")
+        return False
+
+# --- CARICAMENTO AVVIO ---
+if 'db' not in st.session_state:
+    st.session_state['db'] = load_db()
 db = st.session_state['db']
 
+# --- SIDEBAR ---
 with st.sidebar:
     st.header("Menu")
-    page = st.radio("Vai a:", ["🔧 Garage (Hardware)", "🧪 Simulatore (Analisi)"])
+    page = st.radio("Navigazione:", ["🛠️ Simulatore", "➕ Nuova Sospensione", "🔧 Modifica Hardware"])
     st.divider()
-    st.subheader("💾 Database (Drive)")
-    st.info("Scarica il file e salvalo nel tuo Google Drive per non perdere i dati.")
-    st.download_button("📥 Scarica JSON", json.dumps(db, indent=4), "suspension_db.json", "application/json")
-    up = st.file_uploader("📤 Carica JSON", type=['json'])
-    if up: st.session_state['db'] = json.load(up); st.rerun()
-
-# --- GARAGE ---
-if page == "🔧 Garage (Hardware)":
-    st.subheader("🔧 Definizione Hardware")
-    act = st.radio("Azione", ["Modifica Esistente", "Crea Nuova"], horizontal=True)
     
-    if act == "Modifica Esistente" and db:
-        name = st.selectbox("Scegli Sospensione", list(db.keys()))
-        d = db[name]['geometry']
-    else: name = ""; d = {}
+    # Stato Connessione
+    if DRIVE_LIBS and "gcp_service_account" in st.secrets and "drive_folder_id" in st.secrets:
+        st.success("🟢 Cloud Attivo")
+        if st.button("🔄 Sincronizza Ora"):
+            st.session_state['db'] = load_db()
+            st.rerun()
+    else:
+        st.error("🔴 Cloud Disconnesso")
+        st.info("Aggiungi 'drive_folder_id' nei secrets.")
+        st.download_button("📥 Backup Locale", json.dumps(db, indent=4), "backup.json", "application/json")
+
+# ==============================================================================
+# 1. NUOVA SOSPENSIONE
+# ==============================================================================
+if page == "➕ Nuova Sospensione":
+    st.subheader("Crea Nuova")
+    with st.form("new_s"):
+        c1,c2 = st.columns(2)
+        name = c1.text_input("Nome")
+        typ = c2.selectbox("Tipo", ["Fork", "Shock"])
+        
+        c3,c4,c5 = st.columns(3)
+        dv = c3.number_input("Ø Pistone", value=50.0 if typ=="Shock" else 34.0)
+        dr = c4.number_input("Ø Stelo", value=18.0 if typ=="Shock" else 12.0)
+        dc = c5.number_input("Ø Clamp", 12.0)
+        
+        if st.form_submit_button("Crea e Salva"):
+            if not name: st.error("Manca nome")
+            else:
+                db[name] = {
+                    "type": typ,
+                    "geometry": {
+                        'd_valve': dv, 'd_rod': dr, 'd_clamp': dc,
+                        'n_port':4, 'n_throat':4, 'd_throat':dv*0.3, 'r_port':dv*0.35, 'w_port':dv*0.4, 'h_deck':2.0,
+                        'bleed':1.5, 'd_leak':0.0, 'p_zero':145.0 if typ=="Shock" else 22.0,
+                        'k_ics':0.0, 'l_ics':0.0, 'flt_ics':0.0, 'd_ics':0.0, 'id_ics':0.0
+                    },
+                    "stacks": {"Base": {"shims": [{"od": dv-2, "th": 0.2}], "stack_float": 0.0}}
+                }
+                save_db(db)
+                st.success("Creata!")
+
+# ==============================================================================
+# 2. MODIFICA HARDWARE
+# ==============================================================================
+elif page == "🔧 Modifica Hardware":
+    if not db: st.warning("Nessun dato"); st.stop()
+    target = st.selectbox("Modifica:", list(db.keys()))
+    d = db[target]['geometry']
     
-    with st.form("hard_form"):
-        c1, c2 = st.columns(2)
-        new_name = c1.text_input("Nome Modello", name)
-        stype = c2.selectbox("Tipo", ["Fork", "Shock"], index=0 if d.get('type','Fork')=='Fork' else 1)
-        
-        tab1, tab2, tab3 = st.tabs(["📐 1. Geometria", "🕳️ 2. Porte & Deck", "🔋 3. Pressurizzazione"])
-        
-        with tab1:
-            c1, c2, c3 = st.columns(3)
-            dv = c1.number_input("Ø Pistone", value=float(d.get('d_valve', 34.0)))
-            dr = c2.number_input("Ø Stelo", value=float(d.get('d_rod', 12.0)))
-            dc = c3.number_input("Ø Clamp", value=float(d.get('d_clamp', 12.0)))
-
-        with tab2:
-            c1, c2, c3, c4 = st.columns(4)
-            np_ = c1.number_input("N. Porte", value=int(d.get('n_port', 4)))
-            nt = c2.number_input("N. Gole (N.thrt)", value=int(d.get('n_throat', 4)))
-            rp = c3.number_input("Raggio (r.port)", value=float(d.get('r_port', 11.0)))
-            wp = c4.number_input("Largh. (w.port)", value=float(d.get('w_port', 14.0)))
+    with st.form("edit_h"):
+        t1, t2, t3 = st.tabs(["Dimensioni", "Porte", "Gas/ICS"])
+        with t1:
+            c1,c2,c3 = st.columns(3)
+            dv = c1.number_input("Pistone", value=float(d.get('d_valve', 34.0)))
+            dr = c2.number_input("Stelo", value=float(d.get('d_rod', 12.0)))
+            dc = c3.number_input("Clamp", value=float(d.get('d_clamp', 12.0)))
+        with t2:
+            c1,c2,c3 = st.columns(3)
+            rp = c1.number_input("Raggio Porta", value=float(d.get('r_port', 12.0)))
+            wp = c2.number_input("Largh. Porta", value=float(d.get('w_port', 14.0)))
+            hd = c3.number_input("h.deck", value=float(d.get('h_deck', 2.0)))
+            c4,c5 = st.columns(2)
+            np_ = c4.number_input("N. Porte", value=int(d.get('n_port', 4)))
+            dt = c5.number_input("Throat", value=float(d.get('d_throat', 9.0)))
+        with t3:
+            pz = st.number_input("P.Gas/ICS (PSI)", value=float(d.get('p_zero', 22.0)))
+            st.caption("Parametri ICS (Solo Forcella)")
+            c1,c2 = st.columns(2)
+            ki = c1.number_input("K.ics", value=float(d.get('k_ics', 0.0)))
+            li = c2.number_input("L.ics", value=float(d.get('l_ics', 0.0)))
             
-            c5, c6, c7 = st.columns(3)
-            hd = c5.number_input("h.deck (Deck Height) [mm]", value=float(d.get('h_deck', 2.0)), help="Altezza ingresso porta")
-            dt = c6.number_input("Ø Throat Minimo", value=float(d.get('d_throat', 9.0)))
-            bl = c7.number_input("Ø Bleed", value=float(d.get('bleed', 1.5)))
+        if st.form_submit_button("Salva Modifiche"):
+            # Aggiorna geometria mantenendo il resto
+            db[target]['geometry'].update({
+                'd_valve': dv, 'd_rod': dr, 'd_clamp': dc, 'r_port': rp, 'w_port': wp, 
+                'h_deck': hd, 'n_port': np_, 'd_throat': dt, 'p_zero': pz, 'k_ics': ki, 'l_ics': li
+            })
+            save_db(db)
+            st.success("Aggiornato!")
 
-        with tab3:
-            c1, c2, c3 = st.columns(3)
-            pz = c1.number_input("P.zero (Gas) [Bar]", value=float(d.get('p_zero', 1.5)))
-            kics = c2.number_input("K.ics [kg/mm]", value=float(d.get('k_ics', 0.0)))
-            lics = c3.number_input("L.ics [mm]", value=float(d.get('l_ics', 0.0)))
-            
-            c4, c5, c6 = st.columns(3)
-            fics = c4.number_input("Float ICS [mm]", value=float(d.get('flt_ics', 0.0)))
-            dics = c5.number_input("Ø Pistone ICS", value=float(d.get('d_ics', 24.0)))
-            idics = c6.number_input("Ø Asta ICS", value=float(d.get('id_ics', 10.0)))
-
-        if st.form_submit_button("💾 SALVA"):
-            if not new_name: st.error("Manca Nome"); st.stop()
-            final_name = new_name if act=="Crea Nuova" else name
-            old_stacks = db.get(name, {}).get('stacks', {"Base": {"shims":[{"od":dv-2,"th":0.2}], "stack_float":0.0}})
-            
-            db[final_name] = {
-                "type": stype,
-                "geometry": {
-                    'd_valve':dv, 'd_rod':dr, 'd_clamp':dc,
-                    'n_port':np_, 'n_throat':nt, 'r_port':rp, 'w_port':wp, 'h_deck':hd,
-                    'd_throat':dt, 'bleed':bl, 'd_leak':0.0,
-                    'p_zero':pz, 'k_ics':kics, 'l_ics':lics, 'flt_ics':fics, 'd_ics':dics, 'id_ics':idics
-                },
-                "stacks": old_stacks
-            }
-            if act=="Modifica Esistente" and new_name!=name: del db[name]
-            st.session_state['db'] = db
-            st.success("Salvato!")
-
-# --- SIMULATORE ---
-elif page == "🧪 Simulatore (Analisi)":
+# ==============================================================================
+# 3. SIMULATORE
+# ==============================================================================
+elif page == "🛠️ Simulatore":
     if not db: st.stop()
     name = st.selectbox("Sospensione", list(db.keys()))
     data = db[name]; g = data['geometry']; stacks = data['stacks']
     
-    col1, col2 = st.columns([1, 1.5])
-    with col1:
-        sname = st.selectbox("Config", list(stacks.keys()) + ["+ Nuova"])
-        if sname == "+ Nuova":
-            nn = st.text_input("Nome"); copy = st.selectbox("Copia", list(stacks.keys()))
-            if st.button("Crea"): db[name]['stacks'][nn] = stacks[copy].copy(); st.rerun()
-            curr = {"shims":[], "stack_float":0}
+    c1, c2 = st.columns([1, 1.5])
+    with c1:
+        sname = st.selectbox("Stack", list(stacks.keys()) + ["+ Nuovo"])
+        if sname == "+ Nuovo":
+            nn = st.text_input("Nome Stack"); cp = st.selectbox("Copia", list(stacks.keys()))
+            if st.button("Crea"): 
+                db[name]['stacks'][nn] = stacks[cp].copy(); save_db(db); st.rerun()
+            curr = {"shims":[], "stack_float":0.0}
         else:
-            if isinstance(stacks[sname], list): stacks[sname] = {"shims":stacks[sname], "stack_float":0}
+            if isinstance(stacks[sname], list): stacks[sname] = {"shims":stacks[sname], "stack_float":0.0}
             curr = stacks[sname]
+            flt = st.number_input("Float (Gioco)", value=float(curr.get('stack_float', 0.0)), step=0.05)
+            edited = st.data_editor(pd.DataFrame(curr['shims']), num_rows="dynamic", column_config={"od":"Diametro","th":"Spessore"}, use_container_width=True)
             
-            # FLOAT DEL PACCO (Gioco)
-            flt = st.number_input("Stack Float (Gioco) [mm]", value=float(curr.get('stack_float', 0.0)), step=0.05)
-            
-            df = pd.DataFrame(curr['shims'])
-            edited = st.data_editor(df, num_rows="dynamic", column_config={"od":"Diametro","th":"Spessore"}, use_container_width=True)
-            
-            if st.button("💾 Salva Stack"):
+            if st.button("💾 Salva su Drive"):
                 db[name]['stacks'][sname] = {"shims": edited.to_dict('records'), "stack_float": flt}
-                st.toast("Salvato!")
+                save_db(db) # Salva e Sincronizza
 
-    with col2:
+    with c2:
         if not edited.empty:
-            c1, c2 = st.columns(2)
-            max_v = c1.slider("u.wheel [m/s]", 0.5, 8.0, 4.0)
-            clk = c2.slider("Clicker %", 0, 100, 100)
+            st.subheader("Grafico")
+            mx = st.slider("Velocità (m/s)", 0.5, 8.0, 4.0)
+            ck = st.slider("Clicker %", 0, 100, 100)
             
             fig, ax = plt.subplots(figsize=(8,5))
-            vv = np.linspace(0, max_v, 50)
+            vv = np.linspace(0, mx, 50)
             
-            cur_d = {"shims": edited.to_dict('records'), "stack_float": flt}
             g['type'] = data['type']
-            
-            sol = SuspensionSolver(g, cur_d)
-            ff = [sol.calculate_force(v, clk) for v in vv]
+            sol = SuspensionSolver(g, {"shims":edited.to_dict('records'), "stack_float":flt})
+            ff = [sol.calculate_force(v, ck) for v in vv]
             ax.plot(vv, ff, 'r-', linewidth=3, label="ATTUALE")
             
             others = st.multiselect("Confronta", [k for k in stacks.keys() if k != sname])
             for o in others:
-                if isinstance(stacks[o], list): s_o = {"shims":stacks[o], "stack_float":0}
-                else: s_o = stacks[o]
-                sol_o = SuspensionSolver(g, s_o)
-                fo = [sol_o.calculate_force(v, clk) for v in vv]
+                if isinstance(stacks[o], list): so = {"shims":stacks[o], "stack_float":0}
+                else: so = stacks[o]
+                sol_o = SuspensionSolver(g, so)
+                fo = [sol_o.calculate_force(v, ck) for v in vv]
                 ax.plot(vv, fo, '--', label=o)
             
             ax.grid(True, alpha=0.3); ax.legend()
-            ax.set_xlabel("u.wheel [m/s]"); ax.set_ylabel("Force [kgf]")
             st.pyplot(fig)
-            
-            bp = sol.calculate_back_pressure() / 100000
-            st.caption(f"Back Pressure: **{bp:.2f} bar** | h.deck (Geo): **{g.get('h_deck',0)}mm**")
